@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Compile Rust Backend (RELEASE)",
+            "type": "shell",
+            "command": "cargo xtask bundle funih --release",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false,
+            },
+        },
+        {
+            "label": "Compile Rust Backend (DEBUG)",
+            "type": "shell",
+            "command": "cargo xtask bundle funih",
+        },
+
+    ]
+}
