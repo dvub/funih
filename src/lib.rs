@@ -49,14 +49,14 @@ fn calculate_gain_reduction(gain: f32, threshold: f32, ratio: f32, knee_width: f
 impl Default for Gain {
     fn default() -> Self {
         let rms = shared(0.0);
-        let gain_reduction = shared(1.0);
+        let amplitude = shared(1.0);
 
-        let compressor = monitor(&rms, Meter::Rms(0.1)) * var(&gain_reduction);
+        let compressor = monitor(&rms, Meter::Rms(0.1)) * (var(&amplitude) >> follow(0.01));
         let graph = compressor.clone() | compressor;
 
         Self {
             rms,
-            gain_reduction,
+            gain_reduction: amplitude,
             params: Arc::new(GainParams::default()),
             graph: Box::new(graph),
             input_buffer: BufferArray::<U2>::new(),
