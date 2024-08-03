@@ -2,11 +2,14 @@ use fundsp::hacker::*;
 use nih_plug::prelude::*;
 use std::sync::Arc;
 use typenum::{UInt, UTerm};
-
-type Filter = Lowpole<f64, UInt<fundsp::typenum::UTerm, fundsp::typenum::B1>>;
+use util::{db_to_gain_fast, gain_to_db_fast};
 
 struct Gain {
-    filters: An<Stack<Filter, Filter>>,
+    // TODO:
+    // use audionode?
+    rms: Shared,
+    gain_reduction: Shared,
+    graph: Box<dyn AudioUnit>,
     input_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     output_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     params: Arc<GainParams>,
@@ -18,11 +21,44 @@ struct GainParams {
     pub gain: FloatParam,
 }
 
+fn calculate_gain_reduction(gain: f32, threshold: f32, ratio: f32, knee_width: f32) -> f32 {
+    // first, we need to convert our gain to decibels.
+    let input_db = gain_to_db_fast(gain);
+
+    // GAIN COMPUTER
+    let reduced_db = {
+        let difference = input_db - threshold;
+        if 2.0 * (difference).abs() <= knee_width {
+            // if we're within the knee range, use some special calculations!
+            let gain_reduction = (difference + (knee_width / 2.0)).powi(2) / (2.0 * knee_width);
+            input_db + (1.0 / ratio - 1.0) * gain_reduction
+        } else if 2.0 * (difference) > knee_width {
+            // above the knee, apply compression
+            threshold + (difference / ratio)
+        } else {
+            // if we're below the knee/threshold
+            input_db
+        }
+    };
+    // to be totally honest, i'm not sure why this has to be done.
+    let final_db = reduced_db - input_db;
+    // convert back to linear space as a factor to multiply the input
+    db_to_gain_fast(final_db)
+}
+
 impl Default for Gain {
     fn default() -> Self {
+        let rms = shared(0.0);
+        let gain_reduction = shared(1.0);
+
+        let compressor = monitor(&rms, Meter::Rms(0.1)) * var(&gain_reduction);
+        let graph = compressor.clone() | compressor;
+
         Self {
+            rms,
+            gain_reduction,
             params: Arc::new(GainParams::default()),
-            filters: lowpole_hz(3000.0) | lowpole_hz(3000.0),
+            graph: Box::new(graph),
             input_buffer: BufferArray::<U2>::new(),
             output_buffer: BufferArray::<U2>::new(),
         }
@@ -117,6 +153,9 @@ impl Plugin for Gain {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // TODO:
+        // use BigBlockAdapter
+
         // offset is the sample offset from beginning of buffer,
         // we dont care about that here
         for (_offset, mut block) in buffer.iter_blocks(MAX_BUFFER_SIZE) {
@@ -129,11 +168,19 @@ impl Plugin for Gain {
                 }
             }
 
-            self.filters.process(
+            self.gain_reduction.set(calculate_gain_reduction(
+                self.rms.value(),
+                -25.0,
+                1000.0,
+                0.0,
+            ));
+
+            self.graph.process(
                 block.samples(),
                 &self.input_buffer.buffer_ref(),
                 &mut self.output_buffer.buffer_mut(),
             );
+
             // write from output buffer
             for (index, mut channel_samples) in block.iter_samples().enumerate() {
                 for n in 0..=1 {
