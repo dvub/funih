@@ -1,13 +1,20 @@
 use fundsp::hacker::*;
 use nih_plug::prelude::*;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use typenum::{UInt, UTerm};
 use util::{db_to_gain_fast, gain_to_db_fast};
 
 struct Gain {
     // TODO:
     // use audionode?
-    rms: Shared,
+    monitor_id: NodeId,
+    net: Net,
+    backend: NetBackend,
+    meter_value: Shared,
+    meter_update: Arc<AtomicBool>,
     gain_reduction: Shared,
     graph: Box<dyn AudioUnit>,
     input_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
@@ -19,6 +26,14 @@ struct Gain {
 struct GainParams {
     #[id = "gain"]
     pub gain: FloatParam,
+
+    #[id = "lvldetection"]
+    pub meter_type: EnumParam<LevelDetection>,
+}
+#[derive(PartialEq, nih_plug::prelude::Enum)]
+enum LevelDetection {
+    Rms,
+    Peak,
 }
 
 fn calculate_gain_reduction(gain: f32, threshold: f32, ratio: f32, knee_width: f32) -> f32 {
@@ -52,21 +67,30 @@ impl Default for Gain {
         let amplitude = shared(1.0);
 
         let compressor = monitor(&rms, Meter::Rms(0.1)) * (var(&amplitude) >> follow(0.01));
-        let graph = compressor.clone() | compressor;
+        let graph = compressor.clone() | compressor.clone();
+
+        let mut net = Net::new(2, 2);
+        let monitor_id = net.chain(Box::new(monitor(&rms, Meter::Rms(0.1))));
+
+        let backend = net.backend();
 
         Self {
-            rms,
+            monitor_id,
+            net,
+            backend,
+            meter_value: rms,
             gain_reduction: amplitude,
-            params: Arc::new(GainParams::default()),
+            params: Arc::new(GainParams::new()),
             graph: Box::new(graph),
             input_buffer: BufferArray::<U2>::new(),
             output_buffer: BufferArray::<U2>::new(),
+            meter_update: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
-impl Default for GainParams {
-    fn default() -> Self {
+impl GainParams {
+    fn new() -> Self {
         Self {
             gain: FloatParam::new(
                 "Gain",
@@ -90,6 +114,7 @@ impl Default for GainParams {
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
             // Persisted fields can be initialized like any other fields, and they'll keep their
             // values when restoring the plugin's state.
+            meter_type: EnumParam::new("Level Detection", LevelDetection::Rms),
         }
     }
 }
@@ -160,22 +185,31 @@ impl Plugin for Gain {
         // we dont care about that here
         for (_offset, mut block) in buffer.iter_blocks(MAX_BUFFER_SIZE) {
             // write into input buffer
-
-            for (index, mut channel_samples) in block.iter_samples().enumerate() {
-                for n in 0..=1 {
-                    let s = *channel_samples.get_mut(n).unwrap();
-                    self.input_buffer.buffer_mut().set_f32(n, index, s);
+            for (sample_index, mut channel_samples) in block.iter_samples().enumerate() {
+                for channel_index in 0..=1 {
+                    let sample = *channel_samples.get_mut(channel_index).unwrap();
+                    self.input_buffer
+                        .buffer_mut()
+                        .set_f32(channel_index, sample_index, sample);
                 }
             }
 
             self.gain_reduction.set(calculate_gain_reduction(
-                self.rms.value(),
+                self.meter_value.value(),
                 -25.0,
                 1000.0,
                 0.0,
             ));
+            if self.meter_update.swap(false, Ordering::Relaxed) {
+                let meter = match self.params.meter_type.value() {
+                    LevelDetection::Rms => Meter::Rms(0.1),
+                    LevelDetection::Peak => Meter::Peak(0.1),
+                };
+                let m = monitor(&self.meter_value, meter);
+                self.net.replace(self.monitor_id, Box::new(m));
+            }
 
-            self.graph.process(
+            self.backend.process(
                 block.samples(),
                 &self.input_buffer.buffer_ref(),
                 &mut self.output_buffer.buffer_mut(),
