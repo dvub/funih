@@ -63,7 +63,7 @@ impl Default for Gain {
             * (var(&amplitude) >> follow(0.01));
 
         let start_note = 0; // MIDI note number for Middle C (C4)
-        let octaves = 8; // Number of octaves to cover
+        let octaves = 12; // Number of octaves to cover
 
         // Generate MIDI note numbers for C Major scale across multiple octaves
         let mut midis = Vec::new();
@@ -73,11 +73,11 @@ impl Default for Gain {
             let base_note = start_note + (octave * 12);
             midis.push(base_note); // C
             midis.push(base_note + 2); // D
-            midis.push(base_note + 4); // E
+            midis.push(base_note + 3); // Eb
             midis.push(base_note + 5); // F
             midis.push(base_note + 7); // G
-            midis.push(base_note + 9); // A
-            midis.push(base_note + 11); // B
+            midis.push(base_note + 8); // A
+            midis.push(base_note + 10); // B
             midis.push(base_note + 12); // Next C
         }
 
@@ -99,7 +99,9 @@ impl Default for Gain {
             for channel in 0..=1 {
                 for i in 0..fft.bins() {
                     for f in &frequencies {
-                        if fft.frequency(i) >= *f - 100.0 && fft.frequency(i) <= *f + 100.0 {
+                        let diff = (fft.frequency(i) - *f).abs();
+                        let tolerance = 25.0;
+                        if diff < tolerance {
                             fft.set(channel, i, fft.at(channel, i));
                         }
                     }
