@@ -4,17 +4,18 @@ use fundsp::hacker::*;
 use nih_plug::prelude::*;
 use params::GainParams;
 use std::sync::Arc;
-use typenum::{UInt, UTerm, B1};
+use typenum::{UInt, UTerm};
 use util::{db_to_gain_fast, gain_to_db_fast};
 
-type Compressor = Binop<FrameMul<UInt<UTerm, B1>>, Pipe<Monitor, Monitor>, Pipe<Var, Follow<f64>>>;
+// type Compressor = Binop<FrameMul<UInt<UTerm, B1>>, Pipe<Monitor, Monitor>, Pipe<Var, Follow<f64>>>;
+// graph: An<Stack<Compressor, Compressor>>
 struct Gain {
     // TODO:
     // use audionode?
     rms: Shared,
     peak: Shared,
     amplitude: Shared,
-    graph: An<Stack<Compressor, Compressor>>,
+    graph: Box<dyn AudioUnit>,
     input_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     output_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     params: Arc<GainParams>,
@@ -60,13 +61,59 @@ impl Default for Gain {
         #[allow(clippy::precedence)]
         let compressor = (monitor(&peak, Meter::Peak(0.1)) >> monitor(&rms, Meter::Rms(0.1)))
             * (var(&amplitude) >> follow(0.01));
-        let graph = compressor.clone() | compressor;
+
+        let start_note = 0; // MIDI note number for Middle C (C4)
+        let octaves = 8; // Number of octaves to cover
+
+        // Generate MIDI note numbers for C Major scale across multiple octaves
+        let mut midis = Vec::new();
+
+        for octave in 0..octaves {
+            // C Major scale: C, D, E, F, G, A, B, C
+            let base_note = start_note + (octave * 12);
+            midis.push(base_note); // C
+            midis.push(base_note + 2); // D
+            midis.push(base_note + 4); // E
+            midis.push(base_note + 5); // F
+            midis.push(base_note + 7); // G
+            midis.push(base_note + 9); // A
+            midis.push(base_note + 11); // B
+            midis.push(base_note + 12); // Next C
+        }
+
+        // Remove duplicates to avoid repeating notes in the last octave
+        midis.sort();
+        midis.dedup();
+
+        // Generate frequencies for each note in the scale
+        let frequencies: Vec<f32> = midis
+            .iter()
+            .map(|&midi_note| midi_to_freq(midi_note as f32))
+            .collect();
+
+        // The window length, which must be a power of two and at least four,
+        // determines the frequency resolution. Latency is equal to the window length.
+        let window_length = 512;
+
+        let synth = resynth::<U2, U2, _>(window_length, move |fft| {
+            for channel in 0..=1 {
+                for i in 0..fft.bins() {
+                    for f in &frequencies {
+                        if fft.frequency(i) >= *f - 100.0 && fft.frequency(i) <= *f + 100.0 {
+                            fft.set(channel, i, fft.at(channel, i));
+                        }
+                    }
+                }
+            }
+        });
+
+        let graph = synth;
 
         Self {
             rms,
             peak,
             amplitude,
-            graph,
+            graph: Box::new(graph),
             params: Arc::new(GainParams::new()),
 
             input_buffer: BufferArray::<U2>::new(),
@@ -206,3 +253,16 @@ impl Vst3Plugin for Gain {
 
 nih_export_clap!(Gain);
 nih_export_vst3!(Gain);
+
+fn midi_to_freq(x: f32) -> f32 {
+    440.0 * 2.0_f32.powf((x - 69.0) / 12.0)
+}
+
+mod tests {
+    use crate::midi_to_freq;
+
+    #[test]
+    fn t() {
+        assert_eq!(midi_to_freq(69.0), 440.0)
+    }
+}
