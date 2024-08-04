@@ -62,26 +62,28 @@ impl Default for Gain {
         let compressor = (monitor(&peak, Meter::Peak(0.1)) >> monitor(&rms, Meter::Rms(0.1)))
             * (var(&amplitude) >> follow(0.01));
 
-        let start_note = 0; // MIDI note number for Middle C (C4)
-        let octaves = 12; // Number of octaves to cover
+        let max_frequency = 44100.0; // Maximum frequency
 
-        // Generate MIDI note numbers for C Major scale across multiple octaves
+        // C Major scale intervals (C, D, E, F, G, A, B, C)
+        let scale_intervals = vec![0, 2, 4, 5, 7, 9, 11, 12];
+
         let mut midis = Vec::new();
+        let mut octave = 0;
+        let mut note = 0;
 
-        for octave in 0..octaves {
-            // C Major scale: C, D, E, F, G, A, B, C
-            let base_note = start_note + (octave * 12);
-            midis.push(base_note); // C
-            midis.push(base_note + 2); // D
-            midis.push(base_note + 3); // Eb
-            midis.push(base_note + 5); // F
-            midis.push(base_note + 7); // G
-            midis.push(base_note + 8); // A
-            midis.push(base_note + 10); // B
-            midis.push(base_note + 12); // Next C
+        // Generate notes until the maximum frequency is reached
+        while midi_to_freq(note as f32) <= max_frequency {
+            for &interval in &scale_intervals {
+                let midi_note = note + interval;
+                if midi_to_freq(midi_note as f32) <= max_frequency {
+                    midis.push(midi_note);
+                }
+            }
+            octave += 1;
+            note = octave * 12;
         }
 
-        // Remove duplicates to avoid repeating notes in the last octave
+        // Remove duplicates and sort MIDI notes
         midis.sort();
         midis.dedup();
 
@@ -100,7 +102,7 @@ impl Default for Gain {
                 for i in 0..fft.bins() {
                     for f in &frequencies {
                         let diff = (fft.frequency(i) - *f).abs();
-                        let tolerance = 25.0;
+                        let tolerance = 125.0;
                         if diff < tolerance {
                             fft.set(channel, i, fft.at(channel, i));
                         }
@@ -259,12 +261,15 @@ nih_export_vst3!(Gain);
 fn midi_to_freq(x: f32) -> f32 {
     440.0 * 2.0_f32.powf((x - 69.0) / 12.0)
 }
+fn freq_to_midi(f: f32) -> f32 {
+    12.0 * (f / 440.0).log2() + 69.0
+}
 
 mod tests {
-    use crate::midi_to_freq;
-
+    use crate::{freq_to_midi, midi_to_freq};
     #[test]
-    fn t() {
-        assert_eq!(midi_to_freq(69.0), 440.0)
+    fn test_conversion() {
+        assert_eq!(midi_to_freq(69.0), 440.0);
+        assert_eq!(freq_to_midi(440.0), 69.0);
     }
 }
