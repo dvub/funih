@@ -1,37 +1,27 @@
+mod params;
+
 use fundsp::hacker::*;
 use nih_plug::prelude::*;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use typenum::{UInt, UTerm};
+use params::GainParams;
+use std::sync::Arc;
+use typenum::{UInt, UTerm, B1};
 use util::{db_to_gain_fast, gain_to_db_fast};
 
+type Compressor = Binop<FrameMul<UInt<UTerm, B1>>, Pipe<Monitor, Monitor>, Pipe<Var, Follow<f64>>>;
 struct Gain {
     // TODO:
     // use audionode?
-    monitor_id: NodeId,
-    net: Net,
-    backend: NetBackend,
-    meter_value: Shared,
-    meter_update: Arc<AtomicBool>,
-    gain_reduction: Shared,
-    graph: Box<dyn AudioUnit>,
+    rms: Shared,
+    peak: Shared,
+    amplitude: Shared,
+    graph: An<Stack<Compressor, Compressor>>,
     input_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     output_buffer: BufferArray<UInt<UInt<UTerm, typenum::B1>, typenum::B0>>,
     params: Arc<GainParams>,
 }
 
-#[derive(Params)]
-struct GainParams {
-    #[id = "gain"]
-    pub gain: FloatParam,
-
-    #[id = "lvldetection"]
-    pub meter_type: EnumParam<LevelDetection>,
-}
 #[derive(PartialEq, nih_plug::prelude::Enum)]
-enum LevelDetection {
+pub enum LevelDetection {
     Rms,
     Peak,
 }
@@ -64,57 +54,23 @@ fn calculate_gain_reduction(gain: f32, threshold: f32, ratio: f32, knee_width: f
 impl Default for Gain {
     fn default() -> Self {
         let rms = shared(0.0);
+        let peak = shared(0.0);
         let amplitude = shared(1.0);
 
-        let compressor = monitor(&rms, Meter::Rms(0.1)) * (var(&amplitude) >> follow(0.01));
-        let graph = compressor.clone() | compressor.clone();
-
-        let mut net = Net::new(2, 2);
-        let monitor_id = net.chain(Box::new(monitor(&rms, Meter::Rms(0.1))));
-
-        let backend = net.backend();
+        #[allow(clippy::precedence)]
+        let compressor = (monitor(&peak, Meter::Peak(0.1)) >> monitor(&rms, Meter::Rms(0.1)))
+            * (var(&amplitude) >> follow(0.01));
+        let graph = compressor.clone() | compressor;
 
         Self {
-            monitor_id,
-            net,
-            backend,
-            meter_value: rms,
-            gain_reduction: amplitude,
+            rms,
+            peak,
+            amplitude,
+            graph,
             params: Arc::new(GainParams::new()),
-            graph: Box::new(graph),
+
             input_buffer: BufferArray::<U2>::new(),
             output_buffer: BufferArray::<U2>::new(),
-            meter_update: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl GainParams {
-    fn new() -> Self {
-        Self {
-            gain: FloatParam::new(
-                "Gain",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-30.0),
-                    max: util::db_to_gain(30.0),
-                    // This makes the range appear as if it was linear when displaying the values as
-                    // decibels
-                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
-                },
-            )
-            // Because the gain parameter is stored as linear gain instead of storing the value as
-            // decibels, we need logarithmic smoothing
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            // There are many predefined formatters we can use here. If the gain was stored as
-            // decibels instead of as a linear gain value, we could have also used the
-            // `.with_step_size(0.1)` function to get internal rounding.
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-            // Persisted fields can be initialized like any other fields, and they'll keep their
-            // values when restoring the plugin's state.
-            meter_type: EnumParam::new("Level Detection", LevelDetection::Rms),
         }
     }
 }
@@ -194,22 +150,19 @@ impl Plugin for Gain {
                 }
             }
 
-            self.gain_reduction.set(calculate_gain_reduction(
-                self.meter_value.value(),
-                -25.0,
-                1000.0,
-                0.0,
-            ));
-            if self.meter_update.swap(false, Ordering::Relaxed) {
-                let meter = match self.params.meter_type.value() {
-                    LevelDetection::Rms => Meter::Rms(0.1),
-                    LevelDetection::Peak => Meter::Peak(0.1),
-                };
-                let m = monitor(&self.meter_value, meter);
-                self.net.replace(self.monitor_id, Box::new(m));
-            }
+            let level = match self.params.meter_type.value() {
+                LevelDetection::Rms => self.rms.value(),
+                LevelDetection::Peak => self.peak.value(),
+            };
 
-            self.backend.process(
+            let threshold = self.params.threshold.value();
+            let ratio = self.params.ratio.value();
+            let knee = self.params.knee_width.value();
+
+            self.amplitude
+                .set(calculate_gain_reduction(level, threshold, ratio, knee));
+
+            self.graph.process(
                 block.samples(),
                 &self.input_buffer.buffer_ref(),
                 &mut self.output_buffer.buffer_mut(),
