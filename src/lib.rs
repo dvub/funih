@@ -1,5 +1,6 @@
 mod params;
 
+use core::f32;
 use fundsp::hacker::*;
 use nih_plug::prelude::*;
 use params::GainParams;
@@ -62,56 +63,7 @@ impl Default for Gain {
         let compressor = (monitor(&peak, Meter::Peak(0.1)) >> monitor(&rms, Meter::Rms(0.1)))
             * (var(&amplitude) >> follow(0.01));
 
-        let max_frequency = 44100.0; // Maximum frequency
-
-        // C Major scale intervals (C, D, E, F, G, A, B, C)
-        let scale_intervals = vec![0, 2, 4, 5, 7, 9, 11, 12];
-
-        let mut midis = Vec::new();
-        let mut octave = 0;
-        let mut note = 0;
-
-        // Generate notes until the maximum frequency is reached
-        while midi_to_freq(note as f32) <= max_frequency {
-            for &interval in &scale_intervals {
-                let midi_note = note + interval;
-                if midi_to_freq(midi_note as f32) <= max_frequency {
-                    midis.push(midi_note);
-                }
-            }
-            octave += 1;
-            note = octave * 12;
-        }
-
-        // Remove duplicates and sort MIDI notes
-        midis.sort();
-        midis.dedup();
-
-        // Generate frequencies for each note in the scale
-        let frequencies: Vec<f32> = midis
-            .iter()
-            .map(|&midi_note| midi_to_freq(midi_note as f32))
-            .collect();
-
-        // The window length, which must be a power of two and at least four,
-        // determines the frequency resolution. Latency is equal to the window length.
-        let window_length = 512;
-
-        let synth = resynth::<U2, U2, _>(window_length, move |fft| {
-            for channel in 0..=1 {
-                for i in 0..fft.bins() {
-                    for f in &frequencies {
-                        let diff = (fft.frequency(i) - *f).abs();
-                        let tolerance = 125.0;
-                        if diff < tolerance {
-                            fft.set(channel, i, fft.at(channel, i));
-                        }
-                    }
-                }
-            }
-        });
-
-        let graph = synth;
+        let graph = compressor.clone() | compressor;
 
         Self {
             rms,
@@ -257,19 +209,3 @@ impl Vst3Plugin for Gain {
 
 nih_export_clap!(Gain);
 nih_export_vst3!(Gain);
-
-fn midi_to_freq(x: f32) -> f32 {
-    440.0 * 2.0_f32.powf((x - 69.0) / 12.0)
-}
-fn freq_to_midi(f: f32) -> f32 {
-    12.0 * (f / 440.0).log2() + 69.0
-}
-
-mod tests {
-    use crate::{freq_to_midi, midi_to_freq};
-    #[test]
-    fn test_conversion() {
-        assert_eq!(midi_to_freq(69.0), 440.0);
-        assert_eq!(freq_to_midi(440.0), 69.0);
-    }
-}
